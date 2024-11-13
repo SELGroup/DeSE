@@ -40,7 +40,7 @@ def train(args):
         se_loss = model.calculate_se_loss1()
         lp_loss = model.calculate_lp_loss(g_dic[args.height], dataset.neg_edge_index, tree_node_embed_dic[args.height])
         loss = args.se_lamda * se_loss + args.lp_lamda * lp_loss
-        optimizer.zero_grad() #梯度归零
+        optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
@@ -200,7 +200,7 @@ if __name__ == "__main__":
     torch.cuda.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True #使得网络相同输入下每次运行的输出固定
+    torch.backends.cudnn.deterministic = True
     dgl.seed(args.seed)
     t1=time()
     train(args)
