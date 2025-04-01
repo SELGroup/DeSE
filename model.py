@@ -28,7 +28,6 @@ class MLP(torch.nn.Module):
         x = self.fc2(x)
         return x
 
-
 class GCN_layer(torch.nn.Module):
     def __init__(self, input_dim, output_dim, activation=None, att=False):
         super().__init__()
@@ -62,7 +61,72 @@ class GCN_layer(torch.nn.Module):
             if self.activation is not None:
                 h=self.activation(h)
             return h
-
+#fast
+class GCN_layer1(torch.nn.Module):
+    def __init__(self, input_dim, output_dim, activation=None, att=False):
+        super().__init__()
+        self.linear = torch.nn.Linear(input_dim, output_dim)
+        self.att_linear = nn.Linear(2*output_dim, 1)
+        self.activation = select_activation(activation)
+        self.att = att
+    '''
+    def edge_attention(self, edges):
+        z2 = torch.cat([edges.src['h'], edges.dst['h']], dim=1)
+        a = self.att_linear(z2)
+        #return {'e': F.leaky_relu(a)}
+        return F.leaky_relu(a)
+    '''
+    def edge_attention(self, graph):
+        src_h = graph.ndata['h'][graph.edges()[0]]  # 源节点特征
+        dst_h = graph.ndata['h'][graph.edges()[1]]  # 目标节点特征
+        z2 = torch.cat([src_h, dst_h], dim=1)       # 拼接特征
+        e = F.leaky_relu(self.att_linear(z2))       # 注意力分数
+        return e
+    
+    def message_func(self, edges):
+        return {'h' : edges.src['h'], 'e' : edges.data['e']}
+    
+    def reduce_func(self, nodes):
+        alpha = F.softmax(nodes.mailbox['e'], dim=1)
+        h = torch.sum(alpha * nodes.mailbox['h'], dim=1)
+        return {'h' : h}
+    
+    def forward(self, graph, h):
+        with graph.local_scope():
+            graph.ndata['h'] = self.linear(h)
+            if self.att:
+                '''
+                t1 = time()
+                graph.apply_edges(self.edge_attention)
+                print("att_edge time:", time()-t1)
+                graph.update_all(self.message_func, self.reduce_func)
+                print("att time:", time()-t1)
+                '''
+                # 计算注意力
+                e = self.edge_attention(graph)
+                e = F.softmax(e, dim=0)  # 对边进行归一化
+                src, dst = graph.edges()
+                edge_weights = e.squeeze(-1)  # 去掉多余的维度
+                
+                # 手动消息传递和聚合 (邻接矩阵乘法替代)
+                h_new = torch.zeros_like(h)
+                h_new.index_add_(0, dst, edge_weights[:, None] * h[src])  # 聚合消息
+            else:
+                graph.update_all(message_func = fn.copy_u('h', 'm'), reduce_func = fn.mean(msg='m',out='h'))
+                '''
+                # 简单的均值聚合
+                src, dst = graph.edges()
+                deg = graph.in_degrees().float().clamp(min=1)  # 防止除零
+                h_new = torch.zeros_like(h)
+                h_new.index_add_(0, dst, h[src])
+                h_new = h_new / deg[:, None]  # 归一化
+                '''
+                h_new = graph.ndata.pop('h')
+            #h=graph.ndata.pop('h')
+            if self.activation is not None:
+                h=self.activation(h_new)
+            return h
+        
 class Assign_layer(torch.nn.Module):
     def __init__(self, embed_dim, num_cluster, activation=None):
         super().__init__()
@@ -97,30 +161,71 @@ def KNN(x, k):
     N =x1.shape[0]
     #adj = sp.coo_matrix((np.ones(len(rows)), (rows, cols)), shape=(N, N))
     values = torch.ones(len(rows), dtype=torch.float)
+    '''
     adj = torch.sparse_coo_tensor(indices=torch.tensor([rows, cols]), 
                                   values=values, 
                                   size=(N, N), 
                                   dtype=torch.float)
+    '''
+    # 确保 rows 和 cols 是 numpy 数组
+    rows = np.array(rows) if not isinstance(rows, np.ndarray) else rows
+    cols = np.array(cols) if not isinstance(cols, np.ndarray) else cols
+    # 创建 PyTorch 稀疏张量
+    indices = torch.tensor(np.stack([rows, cols]), dtype=torch.long)
+    adj = torch.sparse_coo_tensor(indices=indices, values=values, size=(N, N), dtype=torch.float)
+    
+    adj = (adj + adj.t()) / 2.0
+    return adj
+
+def KNN_dynamic(x, degree):
+    x1 = x.detach().numpy()
+    EPS = 1e-6
+    #k_list = np.ceil(degree.numpy()/10+EPS).astype(int)
+    #k_list = np.ceil(np.sqrt(degree.numpy())+EPS).astype(int)
+    k_list = np.ceil(np.log2(degree.numpy()+1)+EPS).astype(int)
+    #d = np.mean(degree.numpy())
+    #k_list = np.floor(d ** (1/(degree.numpy()+1)) ).astype(int)
+    max_k = np.max(k_list)
+    nbrs = NearestNeighbors(n_neighbors=max_k, algorithm='auto').fit(x1)
+    distances, indices = nbrs.kneighbors(x1)
+    rows = []
+    cols = []
+    values = []
+    for i, k in enumerate(k_list):
+        for j in range(k):
+            rows.append(i)
+            cols.append(indices[i, j])
+            values.append(1)
+    adj = torch.sparse_coo_tensor(
+        indices=torch.tensor([rows, cols], dtype=torch.long),
+        values=torch.tensor(values, dtype=torch.float32),
+        size=(x1.shape[0], x1.shape[0]),
+        dtype=torch.float32
+    )
     adj = (adj + adj.t()) / 2.0
     return adj
 
 class ASS(torch.nn.Module):
-    def __init__(self, embed_dim, num_cluster, k, dropout=0.1, activation=None):
+    def __init__(self, embed_dim, num_cluster, k, dropout=0.1, activation=None, flag_feature=True):
         super().__init__()
         self.GCN_emb=GCN_layer(embed_dim, embed_dim, activation, att=False)
         self.GCN_ass=GCN_layer(embed_dim, num_cluster, activation, att=True)
         self.num_cluster = num_cluster
         self.k = k
         self.mlp = MLP(embed_dim, embed_dim, embed_dim, dropout, activation)
+        self.flag = flag_feature
     
     def forward(self, graph, x, adj_g):
         h = self.GCN_emb(graph, x)
         s = torch.softmax(self.GCN_ass(graph, x), dim=-1)
         e = s.t() @ h
         adj_g1 = s.t() @ adj_g @ s
-        adj_f1 = KNN(self.mlp(e), self.k)
+        if self.flag:
+            adj_f1 = KNN(self.mlp(e), self.k)
+            #adj_f1 = KNN_dynamic(self.mlp(e), adj_g1.sum(dim=1))
+        else:
+            adj_f1 = None
         return h, e, s, (adj_g1, adj_f1)
-
 
 class DeSE(torch.nn.Module):
     def __init__(self, args, feature, device):
@@ -139,7 +244,10 @@ class DeSE(torch.nn.Module):
         self.gnn = GCN_layer(self.input_dim, self.embed_dim, self.activation, att=False)
         self.assignlayers = nn.ModuleList([])
         for i in range(self.height - 1):
-            self.assignlayers.append(ASS(self.embed_dim, num_clusters_layer[i], args.k, args.dropout, self.activation))
+            if i == 0:
+                self.assignlayers.append(ASS(self.embed_dim, num_clusters_layer[i], args.k, args.dropout, self.activation, flag_feature=False))
+            else:
+                self.assignlayers.append(ASS(self.embed_dim, num_clusters_layer[i], args.k, args.dropout, self.activation))
         self.device=device
         self.beta_f = args.beta_f
         self.k = args.k
@@ -155,24 +263,26 @@ class DeSE(torch.nn.Module):
             t[torch.arange(t.shape[0]), idx] = 1
             self.hard_dic[h] = t
 
-    
-    def forward(self, adj_g, feature):
+    def forward(self, adj_g, feature, degree):
         adj_f = KNN(self.mlp(feature), self.k)
+        #adj_f = KNN_dynamic(self.mlp(feature), degree)
         adj = adj_g + self.beta_f * adj_f
         g = g_from_torchsparse(adj)
         e = self.gnn(g, feature)
         s_dic = {} #layer2, layer1
         tree_node_embed_dic ={self.height: e.to(self.device)} #layer2, layer1
         g_dic ={self.height: g} #layer2, layer1
+
         for i, layer in enumerate(self.assignlayers):
             h, e, s, (adj_g, adj_f) = layer(g, e, adj_g)
             tree_node_embed_dic[self.height-i-1] = e.to(self.device)
             s_dic[self.height-i] = s.to(self.device)
-            adj = adj_g + self.beta_f * adj_f
             if i==self.height-2:
                 break
+            adj = adj_g + self.beta_f * adj_f
             g = g_from_torchsparse(adj.to_sparse())
             g_dic[self.height-i-1] = g.to(self.device)
+
         s_dic[1] = torch.ones(s.shape[-1], 1).to(self.device)
         self.hard(s_dic)
         self.s_dic = s_dic

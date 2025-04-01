@@ -16,7 +16,7 @@ import networkx as nx
 from matplotlib.colors import ListedColormap
 os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 torch.autograd.set_detect_anomaly(True)
-
+print(torch.cuda.is_available())
 
 def train(args):
     #prepare graph dataset and device
@@ -24,23 +24,29 @@ def train(args):
         device = 'cuda:{}'.format(args.gpu)
     else:
         device = 'cpu'
+    device = 'cpu'
+    print(device)
     dataset = Data(args.dataset, device)
     dataset.print_statistic()
+    #dataset.print_degree()
     
     best_cluster_result = {}
-    best_cluster = {'nmi': 0, 'ari': 0, 'acc': 0, 'f1': 0}
-    t0 =localtime()
+    best_cluster = {'nmi': -0.001, 'ari': -0.001, 'acc': -0.001, 'f1': -0.001}
     #prepare model
     model = DeSE(args, dataset.feature, device).to(device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    t0 = time()
     for epoch in range(args.epochs):
         t1 = time()
-        s_dic, tree_node_embed_dic, g_dic = model(dataset.adj, dataset.feature)
+        s_dic, tree_node_embed_dic, g_dic = model(dataset.adj, dataset.feature, dataset.degrees)
         #se_loss = model.calculate_se_loss(s_dic, g_dic[args.height])
+        t2 = time()
         se_loss = model.calculate_se_loss1()
+        t3= time()
         lp_loss = model.calculate_lp_loss(g_dic[args.height], dataset.neg_edge_index, tree_node_embed_dic[args.height])
+        t4 = time()
         loss = args.se_lamda * se_loss + args.lp_lamda * lp_loss
-        optimizer.zero_grad()
+        optimizer.zero_grad() #梯度归零
         loss.backward()
         optimizer.step()
 
@@ -70,7 +76,8 @@ def train(args):
                     torch.save(model.state_dict(), './save_model/{}_{}_f1.pt'.format(args.dataset, args.num_clusters_layer[0]))
             
             print(f"Epoch: {epoch} [{time()-t1:.3f}s], Loss: {loss.item():.6f} = {args.se_lamda} * {se_loss.item():.6f} + {args.lp_lamda} * {lp_loss.item():.6f}, NMI: {nmi:.6f}, ARI: {ari:.6f}, ACC: {acc:.6f}, F1: {f1:.6f}")
-    
+            #print(f"train time: {t2-t1}; se_loss time: {t3-t2}; lp_loss time: {t4-t3}")
+    #print('Total time: {:.3f}s'.format(time()-t0))
     print(f"Best NMI: {best_cluster_result['nmi']}, Best ARI: {best_cluster_result['ari']}, \nBest Cluster: {best_cluster}")
     print(args)
 
@@ -158,13 +165,13 @@ if __name__ == "__main__":
         args.lr = 0.001  #0.001
         args.seed = 262  #262
     elif args.dataset == 'Photo':
-        args.epochs = 600  #800
+        args.epochs = 800  #800
         args.verbose = 20
         args.beta_f = 0.5  #0.4
         args.dropout = 0.3  #0.05
         args.embed_dim = 32  #64
         args.k = 1
-        args.num_clusters_layer = [10]  #[9]
+        args.num_clusters_layer = [9]  #[9]
         args.lp_lamda = 0.5  #5
         args.se_lamda = 0.01  #0.01
         args.lr = 0.001
@@ -176,7 +183,7 @@ if __name__ == "__main__":
         args.dropout = 0.3
         args.embed_dim = 8  #32
         args.k = 1
-        args.num_clusters_layer = [12]
+        args.num_clusters_layer = [11]
         args.lp_lamda = 5  #0.5
         args.se_lamda = 0.5  #0.2
         args.lr = 0.005  #0.001
@@ -193,17 +200,15 @@ if __name__ == "__main__":
         args.se_lamda = 0.5
         args.lr = 0.001
         args.seed = 335
-
+    
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.deterministic = True #使得网络相同输入下每次运行的输出固定
     dgl.seed(args.seed)
-    t1=time()
     train(args)
-    print('Total time: {:.3f}s'.format(time()-t1))
     #draw_network(args.dataset)
     
