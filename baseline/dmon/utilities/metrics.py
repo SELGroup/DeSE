@@ -32,6 +32,7 @@ def recall(y_true, y_pred):
 def accuracy_score(y_true, y_pred):
   true_positives, false_positives, false_negatives, true_negatives = _compute_counts(
       y_true, y_pred)
+  print(true_positives, false_positives, false_negatives, true_negatives)
   return (true_positives + true_negatives) / (
       true_positives + false_positives + false_negatives + true_negatives)
 
@@ -54,7 +55,7 @@ def _compute_counts(y_true, y_pred):  # TODO(tsitsulin): add docstring pylint: d
 
 
 def modularity(adjacency, clusters):
-  degrees = adjacency.sum(axis=0).A1
+  degrees = adjacency.sum(axis=0).flatten()
   m = degrees.sum()
   result = 0
   for cluster_id in np.unique(clusters):

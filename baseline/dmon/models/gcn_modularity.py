@@ -16,8 +16,8 @@
 """TODO(tsitsulin): add headers, tests, and improve style."""
 from typing import List
 import tensorflow.compat.v2 as tf
-from graph_embedding.dmon.layers.gcn import GCN
-from graph_embedding.dmon.layers.modularity import ModularityPooling
+from layers.gcn import GCN
+from layers.modularity import ModularityPooling
 
 
 def gcn_modularity(inputs,  # TODO(tsitsulin): improve signature and documentation pylint: disable=dangerous-default-value,missing-function-docstring
