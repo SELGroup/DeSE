@@ -1,1 +1,1 @@
-DeSE@WWW
+DeSE@KDD
